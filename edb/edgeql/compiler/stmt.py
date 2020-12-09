@@ -75,6 +75,16 @@ def compile_SelectQuery(
             sctx.partial_path_prefix = ctx.partial_path_prefix
             stmt.implicit_wrapper = True
 
+            # We need to preserve view_rptr if this SELECT is just
+            # an implicit wrapping of a single DISTINCT, because otherwise
+            # using a DISTINCT to satisfy link multiplicity requirement
+            # will kill the link properties.
+            #
+            # This includes problems with initializing the schema itself.
+            if (isinstance(expr.result, qlast.UnaryOp) and
+                    expr.result.op == 'DISTINCT'):
+                sctx.view_rptr = ctx.view_rptr
+
         if expr.limit is not None:
             sctx.inhibit_implicit_limit = True
         elif ((ctx.expr_exposed or sctx.stmt is ctx.toplevel_stmt)
