@@ -25,7 +25,6 @@ import locale
 import logging
 import os
 import os.path
-import platform
 import re
 import shutil
 import subprocess
@@ -45,17 +44,6 @@ from . import pgconnparams
 
 
 logger = logging.getLogger(__name__)
-
-_system = platform.uname().system
-
-if _system == 'Windows':
-    def platform_exe(name):
-        if name.endswith('.exe'):
-            return name
-        return name + '.exe'
-else:
-    def platform_exe(name):
-        return name
 
 
 def _is_c_utf8_locale_present() -> bool:
@@ -242,8 +230,7 @@ class BaseCluster:
         return process.stdout
 
     def _find_pg_binary(self, binary):
-        bpath = platform_exe(os.path.join(self._pg_bin_dir, binary))
-
+        bpath = os.path.join(self._pg_bin_dir, binary)
         if not os.path.isfile(bpath):
             raise ClusterError(
                 'could not find {} executable: '.format(binary) +
@@ -282,13 +269,11 @@ class BaseCluster:
         if pg_config_path is None:
             pg_install = os.environ.get('PGINSTALLATION')
             if pg_install:
-                pg_config_path = platform_exe(
-                    os.path.join(pg_install, 'pg_config'))
+                pg_config_path = os.path.join(pg_install, 'pg_config')
             else:
                 pathenv = os.environ.get('PATH').split(os.pathsep)
                 for path in pathenv:
-                    pg_config_path = platform_exe(
-                        os.path.join(path, 'pg_config'))
+                    pg_config_path = os.path.join(path, 'pg_config')
                     if os.path.exists(pg_config_path):
                         break
                 else:
@@ -338,7 +323,7 @@ class Cluster(BaseCluster):
                     'could not parse pg_ctl status output: {}'.format(
                         stdout.decode()))
             self._daemon_pid = int(r.group(1))
-            return self._test_connection(timeout=0)
+            return 'running'
         else:
             raise ClusterError(
                 'pg_ctl status exited with status {:d}: {}'.format(
@@ -408,7 +393,7 @@ class Cluster(BaseCluster):
 
         return output.decode()
 
-    def start(self, wait=60, *, server_settings=None, port, **opts):
+    def start(self, wait=60, *, server_settings=None, **opts):
         """Start the cluster."""
         status = self.get_status()
         if status == 'running':
@@ -419,7 +404,11 @@ class Cluster(BaseCluster):
                     self._data_dir))
 
         extra_args = ['--{}={}'.format(k, v) for k, v in opts.items()]
-        extra_args.append('--port={}'.format(port))
+
+        # We connect to our PostgreSQL server via a Unix socket,
+        # with TCP disabled. Which means that we don't really
+        # care about the port number being unique or even available.
+        extra_args.append('--port=65535')
 
         start_settings = {
             'listen_addresses': '',  # we use Unix sockets
@@ -448,41 +437,17 @@ class Cluster(BaseCluster):
         for k, v in start_settings.items():
             extra_args.extend(['-c', '{}={}'.format(k, v)])
 
-        if _system == 'Windows':
-            # On Windows we have to use pg_ctl as direct execution
-            # of postgres daemon under an Administrative account
-            # is not permitted and there is no easy way to drop
-            # privileges.
-            if os.getenv('EDGEDB_DEBUG_PGSERVER'):
-                stdout = sys.stdout
-            else:
-                stdout = subprocess.DEVNULL
+        if os.getenv('EDGEDB_DEBUG_PGSERVER'):
+            stdout = sys.stdout
+        else:
+            stdout = subprocess.DEVNULL
 
-            process = subprocess.run(
-                [self._pg_ctl, 'start', '-D', self._data_dir,
-                 '-o', ' '.join(extra_args)],
+        self._daemon_process = \
+            subprocess.Popen(
+                [self._postgres, '-D', self._data_dir, *extra_args],
                 stdout=stdout, stderr=subprocess.STDOUT)
 
-            if process.returncode != 0:
-                if process.stderr:
-                    stderr = ':\n{}'.format(process.stderr.decode())
-                else:
-                    stderr = ''
-                raise ClusterError(
-                    'pg_ctl start exited with status {:d}{}'.format(
-                        process.returncode, stderr))
-        else:
-            if os.getenv('EDGEDB_DEBUG_PGSERVER'):
-                stdout = sys.stdout
-            else:
-                stdout = subprocess.DEVNULL
-
-            self._daemon_process = \
-                subprocess.Popen(
-                    [self._postgres, '-D', self._data_dir, *extra_args],
-                    stdout=stdout, stderr=subprocess.STDOUT)
-
-            self._daemon_pid = self._daemon_process.pid
+        self._daemon_pid = self._daemon_process.pid
 
         self._test_connection(timeout=wait)
 
@@ -618,9 +583,8 @@ class Cluster(BaseCluster):
     def trust_local_connections(self):
         self.reset_hba()
 
-        if _system != 'Windows':
-            self.add_hba_entry(type='local', database='all',
-                               user='all', auth_method='trust')
+        self.add_hba_entry(type='local', database='all',
+                           user='all', auth_method='trust')
         self.add_hba_entry(type='host', address='127.0.0.1/32',
                            database='all', user='all',
                            auth_method='trust')
@@ -632,9 +596,8 @@ class Cluster(BaseCluster):
             self.reload()
 
     def trust_local_replication_by(self, user):
-        if _system != 'Windows':
-            self.add_hba_entry(type='local', database='replication',
-                               user=user, auth_method='trust')
+        self.add_hba_entry(type='local', database='replication',
+                           user=user, auth_method='trust')
         self.add_hba_entry(type='host', address='127.0.0.1/32',
                            database='replication', user=user,
                            auth_method='trust')
@@ -704,12 +667,15 @@ class Cluster(BaseCluster):
         self._connection_addr = None
 
         loop = asyncio.new_event_loop()
+        connected = False
+
+        niters = max(timeout, 1)
 
         try:
-            for _ in range(timeout):
+            for _ in range(niters):
                 if self._connection_addr is None:
                     conn_addr = self._get_connection_addr()
-                    if conn_addr is None:
+                    if conn_addr is None and timeout >= 1:
                         time.sleep(1)
                         continue
 
@@ -724,7 +690,8 @@ class Cluster(BaseCluster):
                 except (OSError, asyncio.TimeoutError,
                         asyncpg.CannotConnectNowError,
                         asyncpg.PostgresConnectionError):
-                    time.sleep(1)
+                    if timeout >= 1:
+                        time.sleep(1)
                     continue
                 except asyncpg.PostgresError:
                     # Any other error other than ServerNotReadyError or
@@ -732,12 +699,16 @@ class Cluster(BaseCluster):
                     # up.
                     break
                 else:
+                    connected = True
                     loop.run_until_complete(con.close())
                     break
         finally:
             loop.close()
 
-        return 'running'
+        if connected:
+            return 'running'
+        else:
+            return 'not-initialized'
 
     def _get_pg_version(self):
         process = subprocess.run(

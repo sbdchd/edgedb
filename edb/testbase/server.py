@@ -394,7 +394,7 @@ def _init_cluster(data_dir=None, *, cleanup_atexit=True, init_settings=None):
     if cluster.get_status() == 'not-initialized':
         cluster.init(server_settings=init_settings)
 
-    cluster.start(port='dynamic')
+    cluster.start(port=0)
     cluster.set_superuser_password('test')
 
     if cleanup_atexit:
@@ -1476,6 +1476,11 @@ class _EdgeDBServer:
 
         if self.auto_shutdown:
             cmd += ['--auto-shutdown']
+
+        if self.debug:
+            print(
+                f'Starting EdgeDB cluster with the following params: {cmd}'
+            )
 
         # Note: for debug comment "stderr=subprocess.PIPE".
         self.proc: asyncio.Process = await asyncio.create_subprocess_exec(
