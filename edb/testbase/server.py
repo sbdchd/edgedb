@@ -875,6 +875,7 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
     BASE_TEST_CLASS = True
 
     con: Any  # XXX: the real type?
+    postgres_dsn: Optional[str] = None
 
     def setUp(self):
         if self.INTERNAL_TESTMODE:

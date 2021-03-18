@@ -754,6 +754,9 @@ class ParallelTextTestRunner:
         cases = tb.get_cases_by_shard(
             cases, selected_shard, total_shards, self.verbosity, stats,
         )
+        if self.postgres_dsn:
+            for case in cases:
+                case.postgres_dsn = self.postgres_dsn
         setup = tb.get_test_cases_setup(cases)
         bootstrap_time_taken = 0
         tests_time_taken = 0
